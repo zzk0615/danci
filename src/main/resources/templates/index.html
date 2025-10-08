@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>单词默写纸</title>
+    <style>
+        body { font-family: Arial, Helvetica, sans-serif; margin: 24px; background:#f8fafc; }
+        h2 { margin-top: 24px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .row { display: flex; gap: 24px; flex-wrap: wrap; }
+        .card { background:#fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; flex: 1; min-width: 320px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+        label { display: block; margin: 8px 0 4px; font-size: 13px; color: #374151; }
+        input, select, textarea { width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; }
+        button { padding: 8px 14px; border: 0; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; transition: filter .15s ease; }
+        button:hover { filter: brightness(1.05); }
+        button.secondary { background: #6b7280; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; background:#fff; }
+        th, td { border: 1px solid #eef2f7; padding: 8px; text-align: left; }
+        thead th { background:#f3f6fb; color:#334155; }
+        tbody tr:nth-child(odd){ background:#fbfdff; }
+        .tag { display: inline-block; padding: 2px 6px; background: #eef2ff; color: #3730a3; border-radius: 12px; font-size: 12px; margin-right: 6px; }
+        .flex { display: flex; gap: 8px; }
+        /* 小屏优化：纵向布局、按钮全宽、表格可横向滚动 */
+        @media (max-width: 640px) {
+            body { margin: 12px; }
+            .row { flex-direction: column; gap: 12px; }
+            .card { padding: 12px; min-width: auto; }
+            label { margin: 6px 0 4px; }
+            input, select, textarea { font-size: 16px; /* 提高可触控性 */ }
+            .flex { flex-direction: column; gap: 8px; }
+            button, .flex > button { width: 100%; }
+            table { display: block; overflow-x: auto; white-space: nowrap; font-size: 14px; }
+            th, td { padding: 6px; }
+        }
+    </style>
+    <script>
+        const api = {
+            async getTags() {
+                const r = await fetch('/api/tags');
+                const j = await r.json();
+                return j.data || [];
+            },
+            async createTag(payload) {
+                const r = await fetch('/api/tags', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                return (await r.json()).data;
+            },
+            async updateTag(payload) {
+                const r = await fetch('/api/tags', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                return (await r.json()).data;
+            },
+            async deleteTag(id) {
+                await fetch(`/api/tags/${id}`, { method: 'DELETE' });
+            },
+            async createWord(payload) {
+                const r = await fetch('/api/words', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                return (await r.json()).data;
+            },
+            async updateWord(payload) {
+                const r = await fetch('/api/words', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                return (await r.json()).data;
+            },
+            async deleteWord(id) {
+                await fetch(`/api/words/${id}`, { method: 'DELETE' });
+            },
+            async listWordsByTag(tagId) {
+                const r = await fetch(`/api/words/byTag?tagId=${tagId}`);
+                const j = await r.json();
+                return j.data || [];
+            },
+            async batchCreateWords(payload) {
+                const r = await fetch('/api/words/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                return (await r.json()).data;
+            },
+            async generatePdf(payload) {
+                const r = await fetch('/api/words/generatePdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const blob = await r.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'words.pdf';
+                a.click();
+                URL.revokeObjectURL(url);
+            }
+        };
+
+        // 简单前端分页（每页10条）
+        let _allTags = [];
+        let _tagPage = 1;
+        let _allWords = [];
+        let _wordPage = 1;
+        const PAGE_SIZE = 10;
+        let _wordKeyword = '';
+
+        function renderPagination(containerId, page, total, onPrev, onNext, onJump, inputId) {
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+            el.innerHTML = `<span>第 ${page} / ${totalPages} 页</span>
+                <button ${page<=1?'disabled':''} onclick="${onPrev}">上一页</button>
+                <button ${page>=totalPages?'disabled':''} onclick="${onNext}">下一页</button>
+                <input id="${inputId}" type="number" min="1" max="${totalPages}" value="${page}" style="width:72px;" />
+                <button onclick="${onJump}">跳转</button>`;
+        }
+
+        function renderTagTable() {
+            const listEl = document.querySelector('#tag-list tbody');
+            listEl.innerHTML = '';
+            const start = ( _tagPage - 1 ) * PAGE_SIZE;
+            const slice = _allTags.slice(start, start + PAGE_SIZE);
+            for (const t of slice) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>${t.id}</td><td>${t.tagName}</td><td>${t.description || ''}</td>
+                    <td class="flex">
+                        <button onclick="onEditTag(${t.id}, '${t.tagName.replace(/'/g, "\'")}', '${(t.description||'').replace(/'/g, "\'")}')">编辑</button>
+                        <button class="secondary" onclick="onDeleteTag(${t.id})">删除</button>
+                    </td>`;
+                listEl.appendChild(tr);
+            }
+            renderPagination('tag-pager', _tagPage, _allTags.length, 'onTagPrev()', 'onTagNext()', 'onTagJump()', 'tag-page-input');
+        }
+
+        function renderWordTable() {
+            const tbody = document.querySelector('#word-list tbody');
+            tbody.innerHTML = '';
+            const start = ( _wordPage - 1 ) * PAGE_SIZE;
+            const filtered = _allWords.filter(w => {
+                if (!_wordKeyword) return true;
+                const kw = _wordKeyword.toLowerCase();
+                return (w.english||'').toLowerCase().includes(kw) || (w.chinese||'').includes(_wordKeyword);
+            });
+            const slice = filtered.slice(start, start + PAGE_SIZE);
+            for (const w of slice) {
+                const tags = (w.tags||[]).map(t=>`<span class="tag">${t.tagName}</span>`).join('');
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>${w.id}</td><td>${w.english}</td><td>${w.chinese}</td><td>${tags}</td>
+                    <td class="flex">
+                        <button onclick="onEditWord(${w.id}, '${w.english.replace(/'/g, "\'")}', '${w.chinese.replace(/'/g, "\'")}', ${(w.tags||[]).map(t=>t.id)})">编辑</button>
+                        <button class="secondary" onclick="onDeleteWord(${w.id})">删除</button>
+                    </td>`;
+                tbody.appendChild(tr);
+            }
+            renderPagination('word-pager', _wordPage, filtered.length, 'onWordPrev()', 'onWordNext()', 'onWordJump()', 'word-page-input');
+        }
+
+        function onTagPrev(){ if (_tagPage>1){ _tagPage--; renderTagTable(); } }
+        function onTagNext(){ const max=Math.max(1, Math.ceil(_allTags.length/PAGE_SIZE)); if (_tagPage<max){ _tagPage++; renderTagTable(); } }
+        function onWordPrev(){ if (_wordPage>1){ _wordPage--; renderWordTable(); } }
+        function onWordNext(){ const max=Math.max(1, Math.ceil(_allWords.length/PAGE_SIZE)); if (_wordPage<max){ _wordPage++; renderWordTable(); } }
+        function onTagJump(){ const max=Math.max(1, Math.ceil(_allTags.length/PAGE_SIZE)); const v=parseInt(document.getElementById('tag-page-input').value||'1',10); _tagPage=Math.min(max, Math.max(1, isNaN(v)?1:v)); renderTagTable(); }
+        function onWordJump(){ const max=Math.max(1, Math.ceil(_allWords.length/PAGE_SIZE)); const v=parseInt(document.getElementById('word-page-input').value||'1',10); _wordPage=Math.min(max, Math.max(1, isNaN(v)?1:v)); renderWordTable(); }
+
+        async function refreshTags() {
+            const tags = await api.getTags();
+            const selector = document.querySelector('#pdf-tags');
+            const wordTagSelector = document.querySelector('#word-tag-select');
+            const wordFilterSelector = document.querySelector('#word-filter-tag');
+            selector.innerHTML = '';
+            wordTagSelector.innerHTML = '';
+            wordFilterSelector.innerHTML = '';
+            _allTags = tags;
+            _tagPage = 1;
+            renderTagTable();
+            for (const t of tags) {
+                const opt = document.createElement('option');
+                opt.value = t.id; opt.textContent = `${t.tagName}`;
+                selector.appendChild(opt);
+
+                const opt2 = document.createElement('option');
+                opt2.value = t.id; opt2.textContent = `${t.tagName}`;
+                wordTagSelector.appendChild(opt2);
+
+                const opt3 = document.createElement('option');
+                opt3.value = t.id; opt3.textContent = `${t.tagName}`;
+                wordFilterSelector.appendChild(opt3);
+            }
+            // 默认按第一个标签加载单词
+            if (tags.length > 0) {
+                wordFilterSelector.value = String(tags[0].id);
+                onFilterWords();
+            }
+        }
+
+        async function onCreateTag() {
+            const tagName = document.querySelector('#tag-name').value.trim();
+            const description = document.querySelector('#tag-desc').value.trim();
+            if (!tagName) { alert('请输入标签名称'); return; }
+            await api.createTag({ tagName, description });
+            document.querySelector('#tag-name').value='';
+            document.querySelector('#tag-desc').value='';
+            refreshTags();
+        }
+        async function onEditTag(id, name, desc) {
+            const newName = prompt('修改标签名', name);
+            if (newName===null) return;
+            const newDesc = prompt('修改描述', desc||'');
+            await api.updateTag({ id, tagName: newName, description: newDesc });
+            refreshTags();
+        }
+        async function onDeleteTag(id) {
+            if (!confirm('确认删除该标签？')) return;
+            await api.deleteTag(id);
+            refreshTags();
+        }
+
+        async function onLoadWordsByTag() {
+            const sel = document.querySelector('#pdf-tags');
+            const selected = Array.from(sel.selectedOptions).map(o=>o.value);
+            const tagId = selected.length>0 ? selected[0] : '';
+            if (!tagId) { document.querySelector('#word-list tbody').innerHTML=''; return; }
+            const words = await api.listWordsByTag(tagId);
+            _allWords = words;
+            _wordPage = 1;
+            renderWordTable();
+        }
+        async function onFilterWords() {
+            const tagId = document.querySelector('#word-filter-tag').value;
+            const words = await api.listWordsByTag(tagId);
+            _allWords = words;
+            _wordPage = 1;
+            renderWordTable();
+        }
+        async function onCreateWord() {
+            const english = document.querySelector('#word-en').value.trim();
+            const chinese = document.querySelector('#word-zh').value.trim();
+            const tagId = document.querySelector('#word-tag-select').value;
+            if (!english || !chinese) { alert('请输入单词与中文'); return; }
+            await api.createWord({ english, chinese, tagIds: tagId?[Number(tagId)]:[] });
+            document.querySelector('#word-en').value='';
+            document.querySelector('#word-zh').value='';
+            onFilterWords();
+        }
+        async function onEditWord(id, en, zh, tagIds) {
+            const newEn = prompt('修改英文', en);
+            if (newEn===null) return;
+            const newZh = prompt('修改中文', zh);
+            let newTag = document.querySelector('#word-tag-select').value || '';
+            const finalTagIds = newTag? [Number(newTag)] : (Array.isArray(tagIds)? tagIds: []);
+            await api.updateWord({ id, english: newEn, chinese: newZh, tagIds: finalTagIds });
+            onFilterWords();
+        }
+        async function onDeleteWord(id) {
+            if (!confirm('确认删除该单词？')) return;
+            await api.deleteWord(id);
+            onLoadWordsByTag();
+        }
+        async function onBatchAdd() {
+            const raw = document.querySelector('#batch-input').value.trim();
+            const tagId = document.querySelector('#word-tag-select').value;
+            if (!raw) { alert('请输入批量内容，每行格式 英文,中文'); return; }
+            const lines = raw.split('\n').map(l=>l.trim()).filter(Boolean);
+            const items = [];
+            for (const line of lines) {
+                const idx = line.indexOf(',');
+                if (idx === -1) continue;
+                const en = line.slice(0, idx).trim();
+                const zh = line.slice(idx+1).trim();
+                if (en && zh) items.push({ english: en, chinese: zh });
+            }
+            if (items.length === 0) { alert('未解析到有效行'); return; }
+            await api.batchCreateWords({ items, tagIds: tagId? [Number(tagId)]:[] });
+            document.querySelector('#batch-input').value='';
+            onLoadWordsByTag();
+        }
+        async function onGeneratePdf() {
+            const sel = document.querySelector('#pdf-tags');
+            const tagIds = Array.from(sel.selectedOptions).map(o=>Number(o.value));
+            const mode = document.querySelector('#pdf-mode').value;
+            await api.generatePdf({ tagIds: tagIds, wordIds: [], mode });
+        }
+
+        window.addEventListener('load', () => {
+            refreshTags().then(onLoadWordsByTag);
+        });
+    </script>
+</head>
+<body>
+    <div class="container">
+    <h1 style="margin:0 0 16px 0; font-size:22px; color:#0f172a;">单词默写纸 · 管理与导出</h1>
+
+    <div class="row">
+        <div class="card">
+            <h2>标签管理</h2>
+            <label>标签名</label>
+            <input id="tag-name" placeholder="如 CET-4" />
+            <label>描述</label>
+            <input id="tag-desc" placeholder="可选" />
+            <div style="margin-top: 10px;" class="flex">
+                <button onclick="onCreateTag()">新增标签</button>
+            </div>
+            <table id="tag-list">
+                <thead><tr><th>ID</th><th>名称</th><th>描述</th><th>操作</th></tr></thead>
+                <tbody></tbody>
+            </table>
+            <div id="tag-pager" style="margin-top:8px; display:flex; gap:8px; align-items:center;"></div>
+        </div>
+
+        <div class="card">
+            <h2>单词管理</h2>
+            <div class="flex" style="align-items:flex-end;">
+                <div style="flex:1;">
+                    <label>关联标签（新增用）</label>
+                    <select id="word-tag-select"></select>
+                </div>
+                <div style="flex:1;">
+                    <label>筛选标签（列表用）</label>
+                    <select id="word-filter-tag" onchange="onFilterWords()"></select>
+                </div>
+                <div style="flex:1;">
+                    <label>关键字搜索</label>
+                    <input id="word-search" placeholder="搜索英文或中文" oninput="_wordKeyword=this.value; _wordPage=1; renderWordTable();" />
+                </div>
+            </div>
+            <label>英文</label>
+            <input id="word-en" placeholder="english" />
+            <label>中文</label>
+            <input id="word-zh" placeholder="中文释义" />
+            <div style="margin-top: 10px;" class="flex">
+                <button onclick="onCreateWord()">新增单词</button>
+            </div>
+            <label style="margin-top:12px;">批量添加（每行：英文,中文）</label>
+            <textarea id="batch-input" rows="6" placeholder="apple,苹果\nbanana,香蕉"></textarea>
+            <div style="margin-top: 10px;" class="flex">
+                <button onclick="onBatchAdd()">批量导入</button>
+            </div>
+            <table id="word-list">
+                <thead><tr><th>ID</th><th>英文</th><th>中文</th><th>标签</th><th>操作</th></tr></thead>
+                <tbody></tbody>
+            </table>
+            <div id="word-pager" style="margin-top:8px; display:flex; gap:8px; align-items:center;"></div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="card">
+            <h2>PDF 生成</h2>
+            <label>选择标签（可多选）</label>
+            <select id="pdf-tags" multiple size="6" style="min-width:200px;"></select>
+            <label>模式</label>
+            <select id="pdf-mode">
+                <option value="默写中文">默写中文（左：英文，右：空）</option>
+                <option value="默写英文">默写英文（左：中文，右：空）</option>
+            </select>
+            <div style="margin-top: 10px;" class="flex">
+                <button onclick="onLoadWordsByTag()">加载该标签单词</button>
+                <button onclick="onGeneratePdf()">生成 PDF</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
+
